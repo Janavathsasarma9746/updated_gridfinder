@@ -184,6 +184,84 @@ def prepare_ntl(
 
     return clipped, affine
 
+#added from line 187 to 264 instead of line from 118 to 185
+def prepare_ntl(
+    ntl_in: Pathy,
+    aoi_in: Pathy,
+    ntl_filter: np.ndarray | None = None,
+    apply_threshold: bool = True,  # Add a flag to control thresholding
+    threshold: float = 0.1,
+) -> tuple[np.ndarray, Affine]:
+    """
+    Convert the supplied NTL raster and output an array of electrified cells
+    as targets for the algorithm. If apply_threshold is False, skip the thresholding step.
+ 
+    Parameters
+    ----------
+    ntl_in : Path to an NTL raster file.
+    aoi_in : Path to a Fiona-readable AOI file.
+    ntl_filter : The filter will be convolved over the raster.
+    apply_threshold : Whether to apply thresholding.
+    threshold : The threshold to apply after filtering, values above are considered electrified.
+ 
+    Returns
+    -------
+    clipped : Array of clipped raster values.
+    affine : Affine raster transformation for the returned array.
+    """
+ 
+    if isinstance(aoi_in, gpd.GeoDataFrame):
+        aoi = aoi_in
+    else:
+        aoi = gpd.read_file(aoi_in)
+ 
+    aoi_buff = aoi.buffer(0.1)
+    coords = [json.loads(aoi.to_json())["features"][0]["geometry"]]
+    coords_buff = [json.loads(aoi_buff.to_json())["features"][0]["geometry"]]
+ 
+    if ntl_filter is None:
+        ntl_filter = create_filter()
+ 
+    # Open the raster and apply the mask (clip to AOI)
+    with rs.open(ntl_in) as ds:
+        ntl, affine = mask(dataset=ds, shapes=coords_buff, crop=True, nodata=0)
+ 
+    if ntl.ndim == 3:
+        ntl = ntl[0]
+ 
+    # Apply thresholding only if apply_threshold is True
+    if apply_threshold:
+        ntl_convolved = signal.convolve2d(ntl, ntl_filter, mode="same")
+        ntl_filtered = ntl - ntl_convolved
+ 
+        ntl_thresh = np.empty_like(ntl_filtered)
+        ntl_thresh[:] = ntl_filtered[:]
+        ntl_thresh[ntl_thresh < threshold] = 0
+        ntl_thresh[ntl_thresh >= threshold] = 1
+ 
+        # Save thresholded raster to memory and reapply the mask
+        with MemoryFile() as f:
+            with f.open(
+                transform=affine,
+                driver="GTiff",
+                height=ntl_thresh.shape[0],
+                width=ntl_thresh.shape[1],
+                count=1,
+                dtype=ntl_thresh.dtype,
+                crs=aoi.crs,
+                nodata=0,
+            ) as ds:
+                ds.write(ntl_thresh, 1)
+            with f.open() as ds:
+                clipped, affine = mask(dataset=ds, shapes=coords, crop=True, nodata=0)
+    else:
+        # If no thresholding, directly clip the original raster
+        clipped, affine = mask(dataset=ds, shapes=coords, crop=True, nodata=0)
+ 
+    if len(clipped.shape) >= 3:
+        clipped = clipped[0]
+ 
+    return clipped, affine
 
 def drop_zero_pop(
     targets_in: Pathy,
