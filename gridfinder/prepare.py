@@ -273,28 +273,117 @@ def drop_zero_pop(
     return targets
 
 
-def prepare_roads(
+# def prepare_roads(
+#     roads: GeoDataFrame,
+#     aoi: GeoDataFrame,
+#     shape: tuple[int, int],
+#     affine: Affine,
+#     nodata: float = 1,
+# ) -> np.ndarray:
+#     """Prepare a roads feature layer for use in algorithm.
+
+#     Parameters
+#     ----------
+#     roads: Roads feature layer. This implementation is specific to
+#         OSM data and won't assign proper weights to other data inputs.
+#     aoi: AOI to clip roads.
+#     shape: shape of resultant raster
+#     affine: affine of resultant raster
+
+#     Returns
+#     -------
+#     roads_raster : Roads as a raster array with the value being the cost of traversing.
+#     """
+
+#     roads["weight"] = 1.0
+#     roads.loc[roads["highway"] == "motorway", "weight"] = 1 / 10
+#     roads.loc[roads["highway"] == "trunk", "weight"] = 1 / 9
+#     roads.loc[roads["highway"] == "primary", "weight"] = 1 / 8
+#     roads.loc[roads["highway"] == "secondary", "weight"] = 1 / 7
+#     roads.loc[roads["highway"] == "tertiary", "weight"] = 1 / 6
+#     roads.loc[roads["highway"] == "unclassified", "weight"] = 1 / 5
+#     roads.loc[roads["highway"] == "residential", "weight"] = 1 / 4
+#     roads.loc[roads["highway"] == "service", "weight"] = 1 / 3
+
+#     # Power lines get weight 0
+#     if "power" in roads:
+#         roads.loc[roads["power"] == "line", "weight"] = 0
+
+#     roads = roads.loc[roads.weight != 1]
+
+#     # sort by weight descending so that lower weight (bigger roads) are
+#     # processed last and overwrite higher weight roads
+#     roads_sorted = roads.sort_values(by="weight", ascending=False)
+
+#     roads_for_raster = [
+#         (row.geometry, row.weight) for _, row in roads_sorted.iterrows()
+#     ]
+#     rast = rasterize(
+#         roads_for_raster,
+#         out_shape=shape,
+#         fill=1,
+#         default_value=0,
+#         all_touched=True,
+#         transform=affine,
+#     )
+
+#     # Clip resulting raster by the AOI
+#     if not aoi.crs == roads.crs:
+#         aoi = aoi.to_crs(crs=roads.crs)  # type: ignore
+#     coords = [json.loads(aoi.to_json())["features"][0]["geometry"]]
+
+#     with MemoryFile() as f:
+#         with f.open(
+#             transform=affine,
+#             driver="GTiff",
+#             height=shape[0],
+#             width=shape[1],
+#             count=1,
+#             dtype=rast.dtype,
+#             crs=roads.crs,
+#             nodata=nodata,
+#         ) as ds:
+#             ds.write(rast, 1)
+#         with f.open() as ds:
+#             clipped, affine = mask(dataset=ds, shapes=coords, crop=True, nodata=nodata)
+
+#     if len(clipped.shape) >= 3:
+#         clipped = clipped[0]
+
+#     return clipped
+
+
+def prepare_cost_raster(
     roads: GeoDataFrame,
+    dem: np.ndarray,  # DEM raster as a 2D array
+    slope: np.ndarray,  # Slope raster as a 2D array
     aoi: GeoDataFrame,
     shape: tuple[int, int],
     affine: Affine,
-    nodata: float = 1,
+    dem_weight: float = 0.3,  # Weight for DEM
+    slope_weight: float = 0.3,  # Weight for slope
+    roads_weight: float = 0.4,  # Weight for roads
+    nodata: float = -1,
 ) -> np.ndarray:
-    """Prepare a roads feature layer for use in algorithm.
-
+    """Prepare a combined cost raster using roads, DEM, and slope.
+ 
     Parameters
     ----------
-    roads: Roads feature layer. This implementation is specific to
-        OSM data and won't assign proper weights to other data inputs.
-    aoi: AOI to clip roads.
-    shape: shape of resultant raster
-    affine: affine of resultant raster
-
+    roads: Roads feature layer.
+    dem: DEM raster array.
+    slope: Slope raster array.
+    aoi: AOI to clip roads and rasters.
+    shape: Shape of resultant raster.
+    affine: Affine transformation of resultant raster.
+    dem_weight, slope_weight, roads_weight: Weights for each input layer in cost raster.
+    nodata: No-data value for the output raster.
+ 
     Returns
     -------
-    roads_raster : Roads as a raster array with the value being the cost of traversing.
+    cost_raster: Combined cost raster as a numpy array.
     """
-
+ 
+    # 1. Process the roads into a raster like in the original function.
     roads["weight"] = 1.0
     roads.loc[roads["highway"] == "motorway", "weight"] = 1 / 10
     roads.loc[roads["highway"] == "trunk", "weight"] = 1 / 9
@@ -304,21 +393,20 @@ def prepare_roads(
     roads.loc[roads["highway"] == "unclassified", "weight"] = 1 / 5
     roads.loc[roads["highway"] == "residential", "weight"] = 1 / 4
     roads.loc[roads["highway"] == "service", "weight"] = 1 / 3
-
-    # Power lines get weight 0
+ 
     if "power" in roads:
         roads.loc[roads["power"] == "line", "weight"] = 0
-
+ 
     roads = roads.loc[roads.weight != 1]
 
     # sort by weight descending so that lower weight (bigger roads) are
     # processed last and overwrite higher weight roads
     roads_sorted = roads.sort_values(by="weight", ascending=False)
-
+ 
     roads_for_raster = [
         (row.geometry, row.weight) for _, row in roads_sorted.iterrows()
     ]
-    rast = rasterize(
+    roads_raster = rasterize(
         roads_for_raster,
         out_shape=shape,
         fill=1,
@@ -326,12 +414,40 @@ def prepare_roads(
         all_touched=True,
         transform=affine,
     )
+ 
+    # 2. Apply DEM classes and weights
+    dem_weights = np.zeros_like(dem)
+    dem_weights[(dem >= 0) & (dem < 500)] = 0.025
+    dem_weights[(dem >= 500) & (dem < 1000)] = 0.075
+    dem_weights[(dem >= 1000) & (dem < 2000)] = 0.15
+    dem_weights[(dem >= 2000) & (dem < 3000)] = 0.25
+    dem_weights[dem >= 3000] = 0.5
 
-    # Clip resulting raster by the AOI
+    # 3. Apply Slope classes and weights
+    slope_weights = np.zeros_like(slope)
+    slope_weights[(slope >= 0) & (slope < 10)] = 0.025
+    slope_weights[(slope >= 10) & (slope < 20)] = 0.075
+    slope_weights[(slope >= 20) & (slope < 30)] = 0.15
+    slope_weights[(slope >= 30) & (slope < 40)] = 0.25
+    slope_weights[slope >= 40] = 0.5
+    
+    # # 2. Normalize DEM and slope to range between 0 and 1.
+    # dem_normalized = (dem - dem.min()) / (dem.max() - dem.min())  # Normalize DEM
+    # slope_normalized = (slope - slope.min()) / (slope.max() - slope.min())  # Normalize Slope
+ 
+    # 3. Combine roads, DEM, and slope rasters with weights.
+    # Use the weights to calculate the final cost raster.
+    cost_raster = (
+        roads_weight * roads_raster +
+        dem_weight * dem_normalized +
+        slope_weight * slope_normalized
+    )
+ 
+    # 4. Clip resulting raster by the AOI.
     if not aoi.crs == roads.crs:
         aoi = aoi.to_crs(crs=roads.crs)  # type: ignore
     coords = [json.loads(aoi.to_json())["features"][0]["geometry"]]
-
+ 
     with MemoryFile() as f:
         with f.open(
             transform=affine,
@@ -339,15 +455,15 @@ def prepare_roads(
             height=shape[0],
             width=shape[1],
             count=1,
-            dtype=rast.dtype,
+            dtype=cost_raster.dtype,
             crs=roads.crs,
             nodata=nodata,
         ) as ds:
-            ds.write(rast, 1)
+            ds.write(cost_raster, 1)
         with f.open() as ds:
             clipped, affine = mask(dataset=ds, shapes=coords, crop=True, nodata=nodata)
-
+ 
     if len(clipped.shape) >= 3:
         clipped = clipped[0]
-
+ 
     return clipped
