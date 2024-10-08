@@ -431,10 +431,10 @@ def prepare_cost_raster(
     slope_weights[(slope >= 30) & (slope < 40)] = 0.25
     slope_weights[slope >= 40] = 0.5
     
-    # # 2. Normalize DEM and slope to range between 0 and 1.
-    # dem_normalized = (dem - dem.min()) / (dem.max() - dem.min())  # Normalize DEM
-    # slope_normalized = (slope - slope.min()) / (slope.max() - slope.min())  # Normalize Slope
- 
+    # Normalize DEM and slope to range between 0 and 1.
+    dem_normalized = (dem_weights - dem_weights.min()) / (dem_weights.max() - dem_weights.min())
+    slope_normalized = (slope_weights - slope_weights.min()) / (slope_weights.max() - slope_weights.min())
+  
     # 3. Combine roads, DEM, and slope rasters with weights.
     # Use the weights to calculate the final cost raster.
     cost_raster = (
