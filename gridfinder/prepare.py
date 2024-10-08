@@ -363,7 +363,7 @@ def prepare_cost_raster(
     dem_weight: float = 0.3,  # Weight for DEM
     slope_weight: float = 0.3,  # Weight for slope
     roads_weight: float = 0.4,  # Weight for roads
-    nodata: float = -1,
+    nodata: float = 1,
 ) -> np.ndarray:
     """Prepare a combined cost raster using roads, DEM, and slope.
  
